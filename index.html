@@ -1169,29 +1169,35 @@ async function placesSearch(city, category){
 /* 받아온 장소에 LLM으로 한글 설명·체류시간·활동강도 보강(AI 키 있을 때만) */
 function hasHangul(s){ return /[가-힣]/.test(s||""); }
 async function enrichPlaces(t){
-  if(!aiKey()) return;
+  if(!aiKey()) return {applied:0,failed:0};
   // 설명이 없거나, 이름이 한글이 아닌(중국어·영어) 장소를 보강 대상으로
-  const todo=t.places.filter(p=>!p.desc || !hasHangul(p.name)).slice(0,60);
-  if(!todo.length) return;
-  const prompt=`아래는 구글 지도에서 가져온 실제 여행 장소야. 각 장소에 대해 한국어로 채워줘:
+  const todo=t.places.filter(p=>!p.desc || !hasHangul(p.name)).slice(0,72);
+  if(!todo.length) return {applied:0,failed:0};
+  const CHUNK=12; let applied=0, failed=0;
+  for(let s=0;s<todo.length;s+=CHUNK){
+    const chunk=todo.slice(s,s+CHUNK);
+    const prompt=`아래는 구글 지도에서 가져온 실제 여행 장소야. 각 장소에 대해 한국어로 채워줘:
 - "ko": 한국에서 통용되는 순수 한글 명칭. 한자·영어면 한글로 바꿔줘(예: 东方明珠→동방명주, The Bund→와이탄, Yu Garden→예원). 이미 자연스러운 한글이면 그대로.
 - "desc": 그 장소가 어떤 곳이고 뭘 볼 수 있는지 구체적 한국어 설명(60자 이내).
 - "stayHours": 예상 체류시간(시간 숫자)
 - "activity": 활동강도(저/중/고 중 하나)
 장소 (번호. 이름 / 도시 / 주소):
-${todo.map((p,i)=>`${i+1}. ${p.name} / ${p.city} / ${p.address||""}`).join("\n")}
+${chunk.map((p,i)=>`${i+1}. ${p.name} / ${p.city} / ${p.address||""}`).join("\n")}
 반드시 아래 JSON 배열만. 순서·개수 그대로, "i"는 위 번호.
 [{"i":1,"ko":"한글 명칭","desc":"설명","stayHours":숫자,"activity":"저|중|고"}]`;
-  try{
-    const arr=await aiJSON(prompt);
-    (Array.isArray(arr)?arr:[]).forEach(r=>{
-      const p=todo[(+r.i||0)-1]; if(!p) return;
-      if(r.ko && hasHangul(r.ko) && !hasHangul(p.name)){ if(!p.en) p.en=p.name; p.name=r.ko; }  // 비한글 이름만 한글로 교체(원문은 en 보관)
-      if(r.desc) p.desc=r.desc;
-      if(r.stayHours) p.stayHours=r.stayHours;
-      p.activity=(r.activity||"").replace(/[^저중고]/g,"")||p.activity||"중";
-    });
-  }catch(e){ /* 보강 실패해도 장소는 유지 */ }
+    try{
+      const arr=await aiJSON(prompt);
+      (Array.isArray(arr)?arr:[]).forEach(r=>{
+        const p=chunk[(+r.i||0)-1]; if(!p) return;
+        if(r.ko && hasHangul(r.ko) && !hasHangul(p.name)){ if(!p.en) p.en=p.name; p.name=r.ko; }  // 비한글 이름만 한글로 교체(원문은 en 보관)
+        if(r.desc){ p.desc=r.desc; applied++; }
+        if(r.stayHours) p.stayHours=r.stayHours;
+        p.activity=(r.activity||"").replace(/[^저중고]/g,"")||p.activity||"중";
+      });
+      save();
+    }catch(e){ failed++; }
+  }
+  return {applied, failed};
 }
 /* 단일 카테고리 Places 추천 */
 async function doRecommendPlaces(category){
@@ -1204,8 +1210,9 @@ async function doRecommendPlaces(category){
     let all=[];
     for(const city of cities){ all=all.concat(await placesSearch(city, category)); }
     const added=addPlacesToTrip(t, all);
-    await enrichPlaces(t);
-    save(); render(); toast(`${added}곳 불러왔어요`);
+    const enr=await enrichPlaces(t);
+    save(); render();
+    toast(enr.failed>0 && enr.applied===0 ? `${added}곳 불러왔어요 · AI 설명 실패(제공자=Groq/키/한도 확인)` : `${added}곳 불러왔어요`, enr.applied===0&&enr.failed>0?5000:2200);
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
 }
 /* 전체 카테고리 Places 추천 */
@@ -1223,8 +1230,9 @@ async function doRecommendPlacesAll(){
       }
     }
     const added=addPlacesToTrip(t, all);
-    await enrichPlaces(t);
-    save(); render(); toast(`전체 ${added}곳 불러왔어요`);
+    const enr=await enrichPlaces(t);
+    save(); render();
+    toast(enr.failed>0 && enr.applied===0 ? `전체 ${added}곳 불러왔어요 · AI 설명 실패(제공자=Groq/키/한도 확인)` : `전체 ${added}곳 불러왔어요`, enr.applied===0&&enr.failed>0?5000:2200);
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
 }
 
