@@ -1186,34 +1186,53 @@ async function placesSearch(city, category){
 }
 /* 받아온 장소에 LLM으로 한글 설명·체류시간·활동강도 보강(AI 키 있을 때만) */
 function hasHangul(s){ return /[가-힣]/.test(s||""); }
+// 이름 바뀐 뒤 같은 이름끼리 겹치는 중복 제거(찜/일정 상태 있는 걸 우선 보존)
+function dedupePlacesByName(t){
+  const rank=x=>x.status==="scheduled"?3:x.status==="candidate"?2:(x.thumb?1:0);
+  const idx={}, keep=[];
+  for(const p of t.places){
+    const k=normKey(p.name); if(!k){ keep.push(p); continue; }
+    if(k in idx){ if(rank(p)>rank(keep[idx[k]])) keep[idx[k]]=p; continue; }
+    idx[k]=keep.length; keep.push(p);
+  }
+  t.places=keep;
+}
 async function enrichPlaces(t){
-  if(!aiKey()) return {applied:0,failed:0};
+  if(!aiKey()) return {applied:0,failed:0,nokey:true};
   // 설명이 없거나, 이름이 한글이 아닌(중국어·영어) 장소를 보강 대상으로
-  const todo=t.places.filter(p=>!p.desc || !hasHangul(p.name)).slice(0,72);
+  const todo=t.places.filter(p=>!p.desc || !hasHangul(p.name)).slice(0,80);
   if(!todo.length) return {applied:0,failed:0};
-  const CHUNK=12; let applied=0, failed=0;
+  const CHUNK=10; let applied=0, failed=0;
   for(let s=0;s<todo.length;s+=CHUNK){
     const chunk=todo.slice(s,s+CHUNK);
-    const prompt=`아래는 구글 지도에서 가져온 실제 여행 장소야. 각 장소에 대해 한국어로 채워줘:
-- "ko": 한국에서 통용되는 순수 한글 명칭. 한자·영어면 한글로 바꿔줘(예: 东方明珠→동방명주, The Bund→와이탄, Yu Garden→예원). 이미 자연스러운 한글이면 그대로.
-- "desc": 그 장소가 어떤 곳이고 뭘 볼 수 있는지 구체적 한국어 설명(60자 이내).
-- "stayHours": 예상 체류시간(시간 숫자)
-- "activity": 활동강도(저/중/고 중 하나)
-장소 (번호. 이름 / 도시 / 주소):
-${chunk.map((p,i)=>`${i+1}. ${p.name} / ${p.city} / ${p.address||""}`).join("\n")}
-반드시 아래 JSON 배열만. 순서·개수 그대로, "i"는 위 번호.
-[{"i":1,"ko":"한글 명칭","desc":"설명","stayHours":숫자,"activity":"저|중|고"}]`;
-    try{
-      const arr=await aiJSON(prompt);
-      (Array.isArray(arr)?arr:[]).forEach(r=>{
-        const p=chunk[(+r.i||0)-1]; if(!p) return;
-        if(r.ko && hasHangul(r.ko) && !hasHangul(p.name)){ if(!p.en) p.en=p.name; p.name=r.ko; }  // 비한글 이름만 한글로 교체(원문은 en 보관)
-        if(r.desc){ p.desc=r.desc; applied++; }
-        if(r.stayHours) p.stayHours=r.stayHours;
-        p.activity=(r.activity||"").replace(/[^저중고]/g,"")||p.activity||"중";
-      });
-      save();
-    }catch(e){ failed++; }
+    const byName={}; chunk.forEach(p=>{ byName[normKey(p.name)]=p; });
+    const prompt=`너는 한국인 여행 가이드야. 아래는 구글 지도에서 가져온 실제 장소 목록이야. 각 장소마다 아래 항목을 채워줘.
+- "name": 입력한 이름을 **글자 그대로 복사**(매칭용, 절대 바꾸지 마).
+- "ko": 한국인이 부르는 순수 한글 이름. 한자·영어·현지어면 한글로 바꿔줘. 예) 东方明珠→동방명주, The Bund→와이탄, Yu Garden→예원, Nanjing Road→난징루. 이미 자연스러운 한글이면 그대로 복사.
+- "desc": 이 장소가 어떤 곳이고 무엇을 볼 수 있는지 한국어 한 문장 설명(15~60자, 구체적으로).
+- "stayHours": 예상 체류시간(시간, 숫자만. 예: 1.5).
+- "activity": "저" 또는 "중" 또는 "고" 중 하나.
+[장소 목록]
+${chunk.map((p,i)=>`${i+1}. ${p.name} / ${p.city} / ${p.address||"주소미상"}`).join("\n")}
+설명이나 다른 말 절대 없이, 아래 형식의 JSON 배열만 출력해:
+[{"name":"입력이름 그대로","ko":"한글이름","desc":"한 문장 설명","stayHours":2,"activity":"중"}]`;
+    let arr=null;
+    try{ arr=await aiJSON(prompt); }
+    catch(e){ failed++; console.warn("enrich 실패:", e && e.message); continue; }
+    if(!Array.isArray(arr)){ failed++; console.warn("enrich: 배열 아님", arr); continue; }
+    console.log("enrich 응답", arr);
+    arr.forEach((r,ri)=>{
+      if(!r) return;
+      let p = r.name ? byName[normKey(r.name)] : null;   // 이름으로 매칭(순서 흔들려도 OK)
+      if(!p) p = chunk[ri];                               // 없으면 순서로
+      if(!p) return;
+      if(r.ko && hasHangul(r.ko) && !hasHangul(p.name)){ if(!p.en) p.en=p.name; p.name=r.ko; }
+      if(r.desc){ p.desc=String(r.desc); }
+      if(r.stayHours) p.stayHours=r.stayHours;
+      if(r.activity) p.activity=(""+r.activity).replace(/[^저중고]/g,"")||p.activity||"중";
+      applied++;
+    });
+    save();
   }
   return {applied, failed};
 }
@@ -1229,9 +1248,17 @@ async function doRecommendPlaces(category){
     for(const city of cities){ all=all.concat(await placesSearch(city, category)); }
     const added=addPlacesToTrip(t, all);
     const enr=await enrichPlaces(t);
+    dedupePlacesByName(t);
     save(); render();
-    toast(enr.failed>0 && enr.applied===0 ? `${added}곳 불러왔어요 · AI 설명 실패(제공자=Groq/키/한도 확인)` : `${added}곳 불러왔어요`, enr.applied===0&&enr.failed>0?5000:2200);
+    toast(enrichMsg(added, enr), 4500);
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
+}
+function enrichMsg(added, enr){
+  let m=`${added}곳 불러왔어요`;
+  if(enr.nokey) return m+" · AI 키 넣으면 한글이름·설명 붙어요";
+  if(enr.applied>0) return m+` · 설명 ${enr.applied}곳 ✓`;
+  if(enr.failed>0) return m+" · AI 보강 실패(제공자=Groq/키/한도 확인)";
+  return m;
 }
 /* 전체 카테고리 Places 추천 */
 async function doRecommendPlacesAll(){
@@ -1249,8 +1276,9 @@ async function doRecommendPlacesAll(){
     }
     const added=addPlacesToTrip(t, all);
     const enr=await enrichPlaces(t);
+    dedupePlacesByName(t);
     save(); render();
-    toast(enr.failed>0 && enr.applied===0 ? `전체 ${added}곳 불러왔어요 · AI 설명 실패(제공자=Groq/키/한도 확인)` : `전체 ${added}곳 불러왔어요`, enr.applied===0&&enr.failed>0?5000:2200);
+    toast(enrichMsg("전체 "+added, enr), 4500);
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
 }
 
