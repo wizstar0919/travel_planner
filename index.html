@@ -1137,6 +1137,21 @@ function addPlacesToTrip(t, arr){
   }
   return added;
 }
+// 구글 장소 유형(types) → 우리 카테고리. 실제 유형으로 재분류(디즈니랜드가 유적으로 뜨는 것 방지)
+function typesToCategory(types, fallback){
+  const t=types||[], has=x=>t.includes(x);
+  if(has("amusement_park")||has("zoo")||has("aquarium")||has("theme_park")) return "관광지";
+  if(has("art_gallery")) return "미술관";
+  if(has("museum")||has("art_museum")) return t.includes("art_museum")?"미술관":"박물관";
+  if(has("department_store")||has("shopping_mall")) return "백화점";
+  if(has("market")||has("supermarket")||has("grocery_store")) return "시장";
+  if(has("national_park")||has("park")||has("garden")||has("botanical_garden")) return "자연·공원";
+  if(has("cafe")||has("coffee_shop")||has("bakery")) return "카페";
+  if(has("restaurant")||has("meal_takeaway")||has("food")) return "맛집";
+  if(has("historical_landmark")||has("historical_place")||has("hindu_temple")||has("church")||has("buddhist_temple")||has("mosque")) return "역사·유적";
+  if(has("tourist_attraction")||has("point_of_interest")) return "관광지";
+  return fallback;
+}
 async function placesSearch(city, category){
   const base=proxyBase();
   const q=encodeURIComponent(`${city} ${PLACE_QUERY[category]||category}`);
@@ -1144,7 +1159,7 @@ async function placesSearch(city, category){
   if(!r.ok){ const tx=await r.text().catch(()=>""); throw new Error("proxy "+r.status+": "+tx.slice(0,140)); }
   const data=await r.json();
   return (data.places||[]).map(p=>({
-    id:uid(), placeId:p.id||"", name:p.name||"", en:"", city, category,
+    id:uid(), placeId:p.id||"", name:p.name||"", en:"", city, category:typesToCategory(p.types,category),
     desc:"", rating:p.rating||"", reviews:p.reviews||"",
     thumb: p.photoName?`${base}?photo=${encodeURIComponent(p.photoName)}`:"",
     lat:p.lat, lng:p.lng, address:p.address||"",
@@ -1152,24 +1167,31 @@ async function placesSearch(city, category){
   }));
 }
 /* 받아온 장소에 LLM으로 한글 설명·체류시간·활동강도 보강(AI 키 있을 때만) */
+function hasHangul(s){ return /[가-힣]/.test(s||""); }
 async function enrichPlaces(t){
   if(!aiKey()) return;
-  const todo=t.places.filter(p=>!p.desc).slice(0,60);
+  // 설명이 없거나, 이름이 한글이 아닌(중국어·영어) 장소를 보강 대상으로
+  const todo=t.places.filter(p=>!p.desc || !hasHangul(p.name)).slice(0,60);
   if(!todo.length) return;
-  const prompt=`아래 여행 장소들 각각에 한국어로 붙여줘: "desc"=매력 한 줄 설명(40자 이내), "stayHours"=예상 체류시간(시간 숫자), "activity"=활동강도(저/중/고 중 하나).
-장소:
-${todo.map((p,i)=>`${i+1}. ${p.name} (${p.city}, ${p.category})`).join("\n")}
-아래 JSON 배열만. 순서·개수 그대로, "i"는 위 번호.
-[{"i":1,"desc":"...","stayHours":숫자,"activity":"저|중|고"}]`;
+  const prompt=`아래는 구글 지도에서 가져온 실제 여행 장소야. 각 장소에 대해 한국어로 채워줘:
+- "ko": 한국에서 통용되는 순수 한글 명칭. 한자·영어면 한글로 바꿔줘(예: 东方明珠→동방명주, The Bund→와이탄, Yu Garden→예원). 이미 자연스러운 한글이면 그대로.
+- "desc": 그 장소가 어떤 곳이고 뭘 볼 수 있는지 구체적 한국어 설명(60자 이내).
+- "stayHours": 예상 체류시간(시간 숫자)
+- "activity": 활동강도(저/중/고 중 하나)
+장소 (번호. 이름 / 도시 / 주소):
+${todo.map((p,i)=>`${i+1}. ${p.name} / ${p.city} / ${p.address||""}`).join("\n")}
+반드시 아래 JSON 배열만. 순서·개수 그대로, "i"는 위 번호.
+[{"i":1,"ko":"한글 명칭","desc":"설명","stayHours":숫자,"activity":"저|중|고"}]`;
   try{
     const arr=await aiJSON(prompt);
     (Array.isArray(arr)?arr:[]).forEach(r=>{
       const p=todo[(+r.i||0)-1]; if(!p) return;
+      if(r.ko && hasHangul(r.ko) && !hasHangul(p.name)){ if(!p.en) p.en=p.name; p.name=r.ko; }  // 비한글 이름만 한글로 교체(원문은 en 보관)
       if(r.desc) p.desc=r.desc;
       if(r.stayHours) p.stayHours=r.stayHours;
       p.activity=(r.activity||"").replace(/[^저중고]/g,"")||p.activity||"중";
     });
-  }catch(e){ /* 설명 못 붙여도 장소는 유지 */ }
+  }catch(e){ /* 보강 실패해도 장소는 유지 */ }
 }
 /* 단일 카테고리 Places 추천 */
 async function doRecommendPlaces(category){
