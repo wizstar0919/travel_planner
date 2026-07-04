@@ -487,11 +487,17 @@ function viewTrip(){
 const CAT_EMOJI={"관광지":"🏛️","역사·유적":"🏯","미술관":"🖼️","박물관":"🏺","축제":"🎉","백화점":"🛍️","시장":"🛒","자연·공원":"🌳","맛집":"🍜","카페":"☕"};
 function catEmoji(c){ return CAT_EMOJI[c]||"📍"; }
 function tabRecommend(t){
+  const cityNames=t.cities.filter(c=>c.name).map(c=>c.name);
+  const curCity=ui.recCity||"전체";
+  // 도시가 2개 이상이면 도시 선택 칩 표시
+  const cityChips = cityNames.length>1
+    ? `<div class="chips">${[["전체","🗺️ 전체 도시"],...cityNames.map(c=>[c,c])].map(([v,l])=>`<button class="chip ${curCity===v?'on':''}" data-recity="${esc(v)}">${esc(l)}</button>`).join("")}</div>` : "";
   const allCats=["전체",...CATEGORIES];
   const chips=allCats.map(c=>`<button class="chip ${ui.recCat===c?'on':''}" data-cat="${esc(c)}">${esc(c)}</button>`).join("");
   const filters=["전체","찜만","미선택만"].map(f=>`<button class="chip ${ui.recFilter===f?'on':''}" data-filter="${f}">${f}</button>`).join("");
   let list = ui.recCat==="전체" ? t.places.slice()
     : t.places.filter(p=>p.category===ui.recCat || (ui.recCat==="관광지"&&!p.category));
+  if(curCity!=="전체") list=list.filter(p=>p.city===curCity);   // 도시 필터
   if(ui.recFilter==="찜만") list=list.filter(p=>p.status==="candidate");
   else if(ui.recFilter==="미선택만") list=list.filter(p=>!p.status||p.status==="none");
   const cards=list.map(p=>placeCard(t,p)).join("");
@@ -500,6 +506,7 @@ function tabRecommend(t){
   const recLabel = isAll ? `✨ 전체 카테고리 한번에 추천 받기 (${src})` : `✨ ${esc(ui.recCat)} 추천 받기 (${src})`;
   const emptyMsg = isAll ? "위 <b>전체 카테고리 한번에 추천 받기</b>를 눌러보세요" : `위 <b>추천 받기</b>를 눌러 ${esc(ui.recCat)} 장소를 받아보세요`;
   return `
+    ${cityChips}
     <div class="chips">${chips}</div>
     <button class="btn sm" data-recommend style="margin-bottom:14px">${recLabel}</button>
     <div class="chips">${filters}</div>
@@ -595,7 +602,7 @@ function scheduledDay(t,placeId){
 function tabSchedule(t){
   const sp=tripSpan(t);
   const staysBtn=`<button class="btn ghost sm" data-stays style="margin-bottom:10px">🏨 숙소 관리 (${t.stays.length})</button>`;
-  const transBtn=`<button class="btn ghost sm" data-transports style="margin-bottom:14px">🚄 도시 간 이동 (${t.transports.length})</button>`;
+  const transBtn=`<button class="btn ghost sm" data-transports style="margin-bottom:14px">✈️ 이동·비행기 (${t.transports.length})</button>`;
   const autoBtn=`<button class="btn" data-autoschedule style="margin-bottom:14px">⚡ 자동으로 일정 짜기 (AI)</button>`;
   let days="";
   if(t.schedule.length){
@@ -694,7 +701,7 @@ function bindGlobal(){
 function onClick(e){
   const el=e.target.closest("[data-open],[data-del],[data-new],[data-settings],[data-back],[data-home],"
     +"[data-addcity],[data-crm],[data-int],[data-create],[data-tab],[data-cat],[data-filter],"
-    +"[data-recommend],[data-place-toggle],[data-place-del],[data-autoschedule],[data-stays],[data-transports],"
+    +"[data-recommend],[data-recity],[data-place-toggle],[data-place-del],[data-autoschedule],[data-stays],[data-transports],"
     +"[data-quick],[data-item-del],[data-dayint],[data-loadtemplate],[data-packai],[data-check],"
     +"[data-packadd],[data-packcat],[data-packdel],[data-scrapadd],[data-scrapdel],[data-infofilter]");
   if(!el) return;
@@ -711,6 +718,7 @@ function onClick(e){
   if("create" in d) return createTrip();
   if("tab" in d) return go("trip",{tab:d.tab});
   if("cat" in d){ ui.recCat=d.cat; return render(); }
+  if("recity" in d){ ui.recCity=d.recity; return render(); }
   if("filter" in d){ ui.recFilter=d.filter; return render(); }
   if("recommend" in d){
     if(hasPlaces()) return ui.recCat==="전체" ? doRecommendPlacesAll() : doRecommendPlaces(ui.recCat);
@@ -859,9 +867,9 @@ function openTransports(){
       <div class="pname">${esc(x.mode||"🚄 이동")} · ${esc(x.fromCity)} → ${esc(x.toCity)}</div>
       <div class="pmeta">${esc(fmtMD(x.date))} · ${esc(x.depart||"")}${x.arrive?" → "+esc(x.arrive):""}</div>
     </div><button class="badge add" data-tdel="${x.id}">삭제</button></div>`).join("")||`<div class="sub">등록된 이동 없음</div>`;
-  const cityOpts=t.cities.map(c=>`<option>${esc(c.name)}</option>`).join("");
-  modal(`<div class="modal-head"><h2>도시 간 이동</h2><button class="x" data-mclose>✕</button></div>
-    <div class="sub" style="margin-bottom:12px">이동 소요시간만 빼고 남는 시간에 자동으로 일정을 배치해요</div>
+  const cityOpts=[...t.cities.map(c=>c.name),"🏠 집(출발/귀가)"].map(c=>`<option>${esc(c)}</option>`).join("");
+  modal(`<div class="modal-head"><h2>이동 · 비행기</h2><button class="x" data-mclose>✕</button></div>
+    <div class="sub" style="margin-bottom:12px">도시 간 이동뿐 아니라 <b>여행 도착·귀환 비행기</b>도 넣으세요.<br>· 도착: <b>🏠 집 → 첫 도시</b> (도착시각 입력)<br>· 귀환: <b>마지막 도시 → 🏠 집</b> (출발시각 입력)<br>자동편성이 <b>도착 후~출발 전 시간에만</b> 일정을 배치해요.</div>
     <div id="tr-list">${rows()}</div>
     <div class="field" style="margin-top:16px"><label>이동 추가</label>
       <div class="row" style="margin-bottom:8px"><select class="input" id="tr-from">${cityOpts}</select><span>→</span><select class="input" id="tr-to">${cityOpts}</select></div>
@@ -1311,7 +1319,7 @@ ${dayList.map(d=>`Day ${d.dayIndex} (${d.date}) - ${d.city||"도시미정"}`).jo
 [방문할 후보 장소]
 ${cands.map(p=>`- ${p.name} / 도시:${p.city} / 카테고리:${p.category} / 체류:${p.stayHours||"?"}h / 강도:${p.activity||"중"} / 시점:${p.bestTime||"-"}`).join("\n")}
 ${t.stays.length?`[숙소] ${t.stays.map(s=>`${s.name}(${s.checkIn}~${s.checkOut})`).join(", ")} — 하루 시작·끝 기준점(앵커)`:""}
-${t.transports.length?`[도시 간 이동] ${t.transports.map(x=>`${x.date} ${x.fromCity}→${x.toCity} ${x.mode||""} ${x.depart||""}~${x.arrive||""}`).join(", ")} — 이동시간 빼고 남는 시간에 배치`:""}
+${t.transports.length?`[이동·비행기] ${t.transports.map(x=>`${x.date} ${x.fromCity}→${x.toCity} ${x.mode||""} ${x.depart||""}~${x.arrive||""}`).join(", ")} — 이동 소요시간은 비우고 남는 시간에 배치. '🏠 집→도시'는 그 도시 도착(도착시각 이후에만 일정), '도시→🏠 집'은 귀환(출발시각 이전에만 일정, 공항 이동 여유 고려).`:""}
 ${extra?`[추가 지시] ${extra}`:""}
 
 규칙:
