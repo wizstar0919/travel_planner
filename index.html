@@ -1173,15 +1173,16 @@ function typesToCategory(types, fallback){
 async function placesSearch(city, category){
   const base=proxyBase();
   const q=encodeURIComponent(`${city} ${PLACE_QUERY[category]||category}`);
-  const r=await fetch(`${base}?q=${q}&max=15`);
+  const r=await fetch(`${base}?q=${q}&city=${encodeURIComponent(city)}&max=15`);
   if(!r.ok){ const tx=await r.text().catch(()=>""); throw new Error("proxy "+r.status+": "+tx.slice(0,140)); }
   const data=await r.json();
+  // 함수가 이미 한글이름·설명까지 붙여서 줌 → 그대로 표시
   return (data.places||[]).map(p=>({
-    id:uid(), placeId:p.id||"", name:p.name||"", en:"", city, category:typesToCategory(p.types,category),
-    desc:"", rating:p.rating||"", reviews:p.reviews||"",
+    id:uid(), placeId:p.id||"", name:p.name||"", en:p.en||"", city, category:typesToCategory(p.types,category),
+    desc:p.desc||"", rating:p.rating||"", reviews:p.reviews||"",
     thumb: p.photoName?`${base}?photo=${encodeURIComponent(p.photoName)}`:"",
     lat:p.lat, lng:p.lng, address:p.address||"",
-    stayHours:"", activity:"", bestTime:"", status:"none"
+    stayHours:p.stayHours||"", activity:p.activity||"", bestTime:"", status:"none"
   }));
 }
 /* 받아온 장소에 LLM으로 한글 설명·체류시간·활동강도 보강(AI 키 있을 때만) */
@@ -1248,19 +1249,11 @@ async function doRecommendPlaces(category){
   try{
     let all=[];
     for(const city of cities){ all=all.concat(await placesSearch(city, category)); }
-    const added=addPlacesToTrip(t, all);
-    const enr=await enrichPlaces(t, (d,n)=>{ const b=document.querySelector("[data-recommend]"); if(b) b.innerHTML=`<span class="spin"></span>AI 설명 붙이는 중 ${d}/${n}…`; });
+    const added=addPlacesToTrip(t, all);   // 함수가 서버측에서 한글이름·설명 이미 붙임
     dedupePlacesByName(t);
     save(); render();
-    toast(enrichMsg(added, enr), 4500);
+    toast(`${added}곳 불러왔어요`);
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
-}
-function enrichMsg(added, enr){
-  let m=`${added}곳 불러왔어요`;
-  if(enr.nokey) return m+" · AI 키 넣으면 한글이름·설명 붙어요";
-  if(enr.applied>0) return m+` · 설명 ${enr.applied}곳 ✓`;
-  if(enr.failed>0) return m+" · AI 보강 실패(제공자=Groq/키/한도 확인)";
-  return m;
 }
 /* 전체 카테고리 Places 추천 */
 async function doRecommendPlacesAll(){
@@ -1276,11 +1269,10 @@ async function doRecommendPlacesAll(){
         try{ all=all.concat(await placesSearch(city, cat)); }catch(e){}
       }
     }
-    const added=addPlacesToTrip(t, all);
-    const enr=await enrichPlaces(t, (d,n)=>{ const b=document.querySelector("[data-recommend]"); if(b) b.innerHTML=`<span class="spin"></span>AI 설명 붙이는 중 ${d}/${n}…`; });
+    const added=addPlacesToTrip(t, all);   // 함수가 서버측에서 한글이름·설명 이미 붙임
     dedupePlacesByName(t);
     save(); render();
-    toast(enrichMsg("전체 "+added, enr), 4500);
+    toast(`전체 ${added}곳 불러왔어요`);
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
 }
 
