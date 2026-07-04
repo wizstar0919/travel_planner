@@ -418,7 +418,7 @@ function viewNew(){
   return `
     <div class="topbar">
       <button class="iconbtn" data-back title="뒤로">‹</button>
-      <h1>새 여행</h1>
+      <h1>${ui.editing?"여행 정보 수정":"새 여행"}</h1>
     </div>
     <div class="content">
       <div class="field">
@@ -449,7 +449,7 @@ function viewNew(){
         </div>
         <div class="status-line" id="b-preview"></div>
       </div>
-      <button class="btn" data-create>만들기</button>
+      <button class="btn" data-create>${ui.editing?"저장":"만들기"}</button>
     </div>`;
 }
 
@@ -467,6 +467,7 @@ function viewTrip(){
     <div class="topbar">
       <button class="iconbtn" data-home title="목록">‹</button>
       <h1>${esc(t.name||"여행")}</h1>
+      <button class="iconbtn" data-edit title="여행 정보 수정">✏️</button>
       <button class="iconbtn" data-settings title="설정">⚙️</button>
     </div>
     <div class="content">
@@ -699,7 +700,7 @@ function bindGlobal(){
   if(ui.screen==="trip" && ui.tab==="추천") hydrateThumbs();
 }
 function onClick(e){
-  const el=e.target.closest("[data-open],[data-del],[data-new],[data-settings],[data-back],[data-home],"
+  const el=e.target.closest("[data-open],[data-del],[data-new],[data-edit],[data-settings],[data-back],[data-home],"
     +"[data-addcity],[data-crm],[data-int],[data-create],[data-tab],[data-cat],[data-filter],"
     +"[data-recommend],[data-recity],[data-place-toggle],[data-place-del],[data-autoschedule],[data-stays],[data-transports],"
     +"[data-quick],[data-item-del],[data-dayint],[data-loadtemplate],[data-packai],[data-check],"
@@ -708,9 +709,10 @@ function onClick(e){
   const d=el.dataset;
   if("open" in d && !e.target.closest("[data-del]")) return go("trip",{tripId:d.open,tab:"추천",recCat:"전체",recFilter:"전체"});
   if("del" in d){ e.stopPropagation(); if(confirm("이 여행을 삭제할까요?")){ state.trips=state.trips.filter(t=>t.id!==d.del); save(); render(); } return; }
-  if("new" in d){ draft=null; return go("new"); }
+  if("new" in d){ draft=null; ui.editing=false; return go("new"); }
+  if("edit" in d){ draft=JSON.parse(JSON.stringify(trip())); ui.editing=true; return go("new"); }
   if("settings" in d) return openSettings();
-  if("back" in d){ draft=null; return go("home"); }
+  if("back" in d){ const wasEdit=ui.editing; const bid=draft&&draft.id; draft=null; ui.editing=false; return wasEdit?go("trip",{tripId:bid}):go("home"); }
   if("home" in d) return go("home");
   if("addcity" in d){ draft.cities.push({id:uid(),name:"",start:"",end:""}); return render(); }
   if("crm" in d){ draft.cities=draft.cities.filter(c=>c.id!==d.crm); return render(); }
@@ -766,6 +768,14 @@ function createTrip(){
   if(!draft.name.trim()){ toast("여행 이름을 입력해 주세요"); document.getElementById("f-name").focus(); return; }
   if(!draft.cities.some(c=>c.name.trim())){ toast("도시를 최소 1개 입력해 주세요"); return; }
   draft.cities=draft.cities.filter(c=>c.name.trim());
+  if(ui.editing){
+    const real=state.trips.find(x=>x.id===draft.id);
+    if(real){ real.name=draft.name; real.cities=draft.cities; real.budget=draft.budget;
+      real.companions=draft.companions; real.intensity=draft.intensity; }
+    const id=draft.id; draft=null; ui.editing=false; save();
+    go("trip",{tripId:id}); toast("여행 정보를 수정했어요");
+    return;
+  }
   state.trips.unshift(draft);
   const id=draft.id; draft=null; save();
   go("trip",{tripId:id,tab:"추천",recCat:"전체",recFilter:"전체"});
