@@ -1197,34 +1197,36 @@ function dedupePlacesByName(t){
   }
   t.places=keep;
 }
-async function enrichPlaces(t){
+async function enrichPlaces(t, onProgress){
   if(!aiKey()) return {applied:0,failed:0,nokey:true};
-  // 설명이 없거나, 이름이 한글이 아닌(중국어·영어) 장소를 보강 대상으로
-  const todo=t.places.filter(p=>!p.desc || !hasHangul(p.name)).slice(0,80);
+  const todo=t.places.filter(p=>!p.desc || !hasHangul(p.name)).slice(0,90);
   if(!todo.length) return {applied:0,failed:0};
-  const CHUNK=10; let applied=0, failed=0;
-  for(let s=0;s<todo.length;s+=CHUNK){
-    const chunk=todo.slice(s,s+CHUNK);
-    const byName={}; chunk.forEach(p=>{ byName[normKey(p.name)]=p; });
+  const CHUNK=15; let applied=0, failed=0;
+  const chunks=[]; for(let s=0;s<todo.length;s+=CHUNK) chunks.push(todo.slice(s,s+CHUNK));
+  for(let ci=0; ci<chunks.length; ci++){
+    if(ci>0) await sleep(3500);   // Groq 분당 한도(429) 회피: 청크 사이 간격
+    const chunk=chunks[ci];
+    const byName={}; chunk.forEach(p=>{ const k=normKey(p.name); if(k) byName[k]=p; });
     const prompt=`너는 한국인 여행 가이드야. 아래는 구글 지도에서 가져온 실제 장소 목록이야. 각 장소마다 아래 항목을 채워줘.
-- "name": 입력한 이름을 **글자 그대로 복사**(매칭용, 절대 바꾸지 마).
-- "ko": 한국인이 부르는 순수 한글 이름. 한자·영어·현지어면 한글로 바꿔줘. 예) 东方明珠→동방명주, The Bund→와이탄, Yu Garden→예원, Nanjing Road→난징루. 이미 자연스러운 한글이면 그대로 복사.
-- "desc": 이 장소가 어떤 곳이고 무엇을 볼 수 있는지 한국어 한 문장 설명(15~60자, 구체적으로).
+- "name": 입력한 이름을 **그대로 복사**(도시·주소는 빼고 이름만, 매칭용).
+- "ko": 한국인이 부르는 **순수 한글** 이름. 한자·영어·현지어면 한글로 바꿔줘(한자 섞지 말고 완전한 한글). 예) 东方明珠→동방명주, The Bund→와이탄, Yu Garden→예원, Prince Gong Mansion→공왕부.
+- "desc": 이 장소가 어떤 곳이고 무엇을 볼 수 있는지 한국어 한 문장 설명(15~60자, 구체적으로. "카페" 같은 뻔한 말 말고).
 - "stayHours": 예상 체류시간(시간, 숫자만. 예: 1.5).
 - "activity": "저" 또는 "중" 또는 "고" 중 하나.
 [장소 목록]
 ${chunk.map((p,i)=>`${i+1}. ${p.name} / ${p.city} / ${p.address||"주소미상"}`).join("\n")}
-설명이나 다른 말 절대 없이, 아래 형식의 JSON 배열만 출력해:
-[{"name":"입력이름 그대로","ko":"한글이름","desc":"한 문장 설명","stayHours":2,"activity":"중"}]`;
+설명·다른 말 절대 없이, 아래 형식의 JSON 배열만 출력:
+[{"name":"이름만","ko":"한글이름","desc":"한 문장 설명","stayHours":2,"activity":"중"}]`;
     let arr=null;
     try{ arr=await aiJSON(prompt); }
     catch(e){ failed++; console.warn("enrich 실패:", e && e.message); continue; }
     if(!Array.isArray(arr)){ failed++; console.warn("enrich: 배열 아님", arr); continue; }
-    console.log("enrich 응답", arr);
     arr.forEach((r,ri)=>{
       if(!r) return;
-      let p = r.name ? byName[normKey(r.name)] : null;   // 이름으로 매칭(순서 흔들려도 OK)
-      if(!p) p = chunk[ri];                               // 없으면 순서로
+      let p=null;
+      if(r.name){ const rk=normKey(r.name);
+        p=byName[rk] || chunk.find(x=>{ const xk=normKey(x.name); return xk && (rk===xk || rk.startsWith(xk) || rk.indexOf(xk)>=0); }); }
+      if(!p) p=chunk[ri];   // 최후: 순서로
       if(!p) return;
       if(r.ko && hasHangul(r.ko) && !hasHangul(p.name)){ if(!p.en) p.en=p.name; p.name=r.ko; }
       if(r.desc){ p.desc=String(r.desc); }
@@ -1232,7 +1234,7 @@ ${chunk.map((p,i)=>`${i+1}. ${p.name} / ${p.city} / ${p.address||"주소미상"}
       if(r.activity) p.activity=(""+r.activity).replace(/[^저중고]/g,"")||p.activity||"중";
       applied++;
     });
-    save();
+    save(); if(onProgress) onProgress(ci+1, chunks.length);
   }
   return {applied, failed};
 }
@@ -1247,7 +1249,7 @@ async function doRecommendPlaces(category){
     let all=[];
     for(const city of cities){ all=all.concat(await placesSearch(city, category)); }
     const added=addPlacesToTrip(t, all);
-    const enr=await enrichPlaces(t);
+    const enr=await enrichPlaces(t, (d,n)=>{ const b=document.querySelector("[data-recommend]"); if(b) b.innerHTML=`<span class="spin"></span>AI 설명 붙이는 중 ${d}/${n}…`; });
     dedupePlacesByName(t);
     save(); render();
     toast(enrichMsg(added, enr), 4500);
@@ -1275,7 +1277,7 @@ async function doRecommendPlacesAll(){
       }
     }
     const added=addPlacesToTrip(t, all);
-    const enr=await enrichPlaces(t);
+    const enr=await enrichPlaces(t, (d,n)=>{ const b=document.querySelector("[data-recommend]"); if(b) b.innerHTML=`<span class="spin"></span>AI 설명 붙이는 중 ${d}/${n}…`; });
     dedupePlacesByName(t);
     save(); render();
     toast(enrichMsg("전체 "+added, enr), 4500);
