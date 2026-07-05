@@ -1181,12 +1181,14 @@ function typesToCategory(types, fallback){
   if(has("tourist_attraction")||has("point_of_interest")) return "관광지";
   return fallback;
 }
+let recAiBusy=false;   // 추천 중 프록시가 "AI 한도로 설명 일부 못 붙임" 신호를 주면 true (doRecommend에서 안내)
 async function placesSearch(city, category){
   const base=proxyBase();
   const q=encodeURIComponent(`${city} ${PLACE_QUERY[category]||category}`);
   const r=await fetch(`${base}?q=${q}&city=${encodeURIComponent(city)}&max=15`);
   if(!r.ok){ const tx=await r.text().catch(()=>""); throw new Error("proxy "+r.status+": "+tx.slice(0,140)); }
   const data=await r.json();
+  if(data.aiBusy) recAiBusy=true;
   // 함수가 이미 한글이름·설명까지 붙여서 줌 → 그대로 표시
   return (data.places||[]).map(p=>({
     id:uid(), placeId:p.id||"", name:p.name||"", en:p.en||"", city, category:typesToCategory(p.types,category),
@@ -1257,6 +1259,7 @@ async function doRecommendPlaces(category){
   if(!cities.length){ toast("먼저 도시를 등록해 주세요"); return; }
   if(category==="축제"){ toast("축제·행사는 Places에 없어요. (추후 별도 지원) 다른 카테고리를 골라주세요"); return; }
   busyBtn("[data-recommend]","장소 불러오는 중...");
+  recAiBusy=false;
   try{
     let all=[];
     for(const city of cities){ all=all.concat(await placesSearch(city, category)); }
@@ -1264,6 +1267,7 @@ async function doRecommendPlaces(category){
     dedupePlacesByName(t);
     save(); render();
     toast(`${added}곳 불러왔어요`); maybeEnrich(t);
+    if(recAiBusy) toast("지금 AI가 바빠서 일부 설명을 못 달았어요. 잠시 후 다시 추천하면 채워져요.",5000);
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
 }
 /* 서버(프록시)가 한글명·설명을 못 붙였고 AI 키가 있으면, 클라이언트에서 조용히 보강(폴백) */
@@ -1282,6 +1286,7 @@ async function doRecommendPlacesAll(){
   if(!cities.length){ toast("먼저 도시를 등록해 주세요"); return; }
   const cats=CATEGORIES.filter(c=>c!=="축제");   // 축제 제외
   busyBtn("[data-recommend]","전체 장소 불러오는 중... (조금 걸려요)");
+  recAiBusy=false;
   try{
     let all=[], tries=0, fails=0, lastErr=null;
     for(const city of cities){
@@ -1294,7 +1299,10 @@ async function doRecommendPlacesAll(){
     dedupePlacesByName(t);
     save(); render();
     if(added===0 && fails===tries && lastErr){ toast(placeErr(lastErr),5000); }  // 전부 실패는 조용히 넘기지 않고 원인 안내
-    else{ toast(`전체 ${added}곳 불러왔어요`); maybeEnrich(t); }
+    else{
+      toast(`전체 ${added}곳 불러왔어요`); maybeEnrich(t);
+      if(recAiBusy) toast("지금 AI가 바빠서 일부 설명을 못 달았어요. 잠시 후 다시 추천하면 채워져요.",5000);
+    }
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
 }
 
