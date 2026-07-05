@@ -2,14 +2,16 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>여행 플래너</title>
 <!--
-  여행 플래너 MVP1 (v1)
+  여행 플래너 MVP1 (v1.1)
   - 단일 HTML, PC·모바일 반응형
   - 저장: localStorage (기본) + 구글 드라이브 동기화(배포 시 로그인)
-  - AI 추천·자동편성: Gemini API (BYOK, 설정에서 키 입력)
+  - AI 추천·자동편성: Gemini/Groq API (BYOK, 설정에서 키 입력)
   참고 문서: 여행플래너_기획서/요구사항정의서/화면설계/셋업가이드 (모두 v1)
+  v1.1 수정: 자동편성 날짜 타임존 버그, 드라이브 동기화 충돌(updatedAt 병합),
+            도시필터 리셋, 추천 오류안내, 장소 느슨매칭, 접근성(줌 허용) 등 13건
 -->
 <style>
   :root{
@@ -306,7 +308,9 @@ function load(){
 }
 let saveTimer=null;
 function save(){
-  try{ localStorage.setItem(STORE_KEY, JSON.stringify(state)); }catch(e){}
+  state.updatedAt = Date.now();   // 드라이브 충돌 병합 기준(더 최신본 채택)
+  try{ localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+  catch(e){ if(e && (e.name==="QuotaExceededError" || /quota|exceeded/i.test(e.message||""))) toast("저장 공간이 가득 찼어요. 오래된 여행을 정리해 주세요",4000); }
   // 드라이브 동기화(로그인 되어 있으면 디바운스 저장)
   if(drive.token){ clearTimeout(saveTimer); saveTimer=setTimeout(()=>drive.upload().catch(()=>{}), 1500); }
 }
@@ -322,6 +326,8 @@ function aiName(){ return aiProvider()==="groq" ? "Groq" : "Gemini"; }
 /* 날짜 유틸 */
 function today(){ const d=new Date(); d.setHours(0,0,0,0); return d; }
 function parseD(s){ if(!s) return null; const d=new Date(s+"T00:00:00"); return isNaN(d)?null:d; }
+/* Date → 로컬 기준 YYYY-MM-DD (toISOString은 UTC라 KST에서 하루 밀림 → 직접 조합) */
+function fmtISO(d){ const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,"0"), dd=String(d.getDate()).padStart(2,"0"); return `${y}-${m}-${dd}`; }
 function fmtMD(s){ const d=parseD(s); if(!d) return "-"; return (d.getMonth()+1)+"."+d.getDate(); }
 function daysBetween(a,b){ return Math.round((b-a)/86400000); }
 function tripSpan(t){
@@ -707,7 +713,7 @@ function onClick(e){
     +"[data-packadd],[data-packcat],[data-packdel],[data-scrapadd],[data-scrapdel],[data-infofilter]");
   if(!el) return;
   const d=el.dataset;
-  if("open" in d && !e.target.closest("[data-del]")) return go("trip",{tripId:d.open,tab:"추천",recCat:"전체",recFilter:"전체"});
+  if("open" in d && !e.target.closest("[data-del]")) return go("trip",{tripId:d.open,tab:"추천",recCat:"전체",recCity:"전체",recFilter:"전체"});
   if("del" in d){ e.stopPropagation(); if(confirm("이 여행을 삭제할까요?")){ state.trips=state.trips.filter(t=>t.id!==d.del); save(); render(); } return; }
   if("new" in d){ draft=null; ui.editing=false; return go("new"); }
   if("edit" in d){ draft=JSON.parse(JSON.stringify(trip())); ui.editing=true; return go("new"); }
@@ -738,7 +744,7 @@ function onClick(e){
   if("packai" in d) return doPackAI();
   if("packadd" in d) return addPackItem(+d.packadd);
   if("packcat" in d) return addPackCat();
-  if("packdel" in d) return delPack(d.packdel);
+  if("packdel" in d){ e.preventDefault(); return delPack(d.packdel); }  // label 안 버튼이라 기본 동작(체크 토글) 막기
   if("scrapadd" in d) return addScrap();
   if("scrapdel" in d){ const t=trip(); t.info=t.info.filter(s=>s.id!==d.scrapdel); save(); return render(); }
   if("infofilter" in d){ ui.infoFilter=d.infofilter; return render(); }
@@ -756,7 +762,9 @@ function onInput(e){
 function onChange(e){
   const d=e.target.dataset;
   if("check" in d){ const [ci,ii]=d.check.split("|").map(Number); const t=trip();
-    t.packing[ci].items[ii].checked=e.target.checked; save(); render(); }
+    t.packing[ci].items[ii].checked=e.target.checked;
+    const lbl=e.target.closest("label.check"); if(lbl) lbl.classList.toggle("done", e.target.checked);  // 전체 재렌더 대신 해당 항목만 갱신(포커스·스크롤 유지)
+    save(); }
 }
 function updateBudgetPreview(){
   if(!draft) return;
@@ -768,6 +776,8 @@ function createTrip(){
   if(!draft.name.trim()){ toast("여행 이름을 입력해 주세요"); document.getElementById("f-name").focus(); return; }
   if(!draft.cities.some(c=>c.name.trim())){ toast("도시를 최소 1개 입력해 주세요"); return; }
   draft.cities=draft.cities.filter(c=>c.name.trim());
+  const badCity=draft.cities.find(c=>c.start&&c.end&&c.end<c.start);
+  if(badCity){ toast(`'${badCity.name}' 도시의 종료일이 시작일보다 빨라요`); return; }
   if(ui.editing){
     const real=state.trips.find(x=>x.id===draft.id);
     if(real){ real.name=draft.name; real.cities=draft.cities; real.budget=draft.budget;
@@ -778,7 +788,7 @@ function createTrip(){
   }
   state.trips.unshift(draft);
   const id=draft.id; draft=null; save();
-  go("trip",{tripId:id,tab:"추천",recCat:"전체",recFilter:"전체"});
+  go("trip",{tripId:id,tab:"추천",recCat:"전체",recCity:"전체",recFilter:"전체"});
   toast("여행이 만들어졌어요 🎉");
 }
 
@@ -863,6 +873,7 @@ function openStays(){
     const name=document.getElementById("st-name").value.trim();
     const ci=document.getElementById("st-in").value, co=document.getElementById("st-out").value;
     if(!name||!ci||!co){ toast("이름·체크인·체크아웃을 입력해 주세요"); return; }
+    if(co<=ci){ toast("체크아웃은 체크인보다 뒤 날짜여야 해요"); return; }
     t.stays.push({id:uid(),name,location:document.getElementById("st-loc").value.trim(),checkIn:ci,checkOut:co});
     t.stays.sort((a,b)=>a.checkIn<b.checkIn?-1:1);
     save(); refresh();
@@ -913,7 +924,7 @@ function changeDayIntensity(di){
   const t=trip(); const day=t.schedule.find(d=>d.dayIndex===di); if(!day) return;
   const order=["relaxed","normal","packed"]; const cur=day.intensity||t.intensity;
   day.intensity=order[(order.indexOf(cur)+1)%3];
-  save(); render(); toast("Day "+di+" 강도: "+({relaxed:"여유",normal:"알차게",packed:"빡세게"}[day.intensity]));
+  save(); render(); toast("Day "+di+" 강도: "+({relaxed:"여유",normal:"알차게",packed:"빡세게"}[day.intensity])+" · 일정에 반영하려면 자동편성을 다시 눌러주세요",3200);
 }
 function doQuick(kind){
   if(kind==="chat"){ const msg=prompt("어떻게 바꿀까요? (예: 오전은 미술관, 오후는 쇼핑 위주로)"); if(msg) doAutoSchedule(msg); return; }
@@ -1252,8 +1263,17 @@ async function doRecommendPlaces(category){
     const added=addPlacesToTrip(t, all);   // 함수가 서버측에서 한글이름·설명 이미 붙임
     dedupePlacesByName(t);
     save(); render();
-    toast(`${added}곳 불러왔어요`);
+    toast(`${added}곳 불러왔어요`); maybeEnrich(t);
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
+}
+/* 서버(프록시)가 한글명·설명을 못 붙였고 AI 키가 있으면, 클라이언트에서 조용히 보강(폴백) */
+async function maybeEnrich(t){
+  try{
+    if(!aiKey()) return;
+    if(!t.places.some(p=>!p.desc || !hasHangul(p.name))) return;
+    const r=await enrichPlaces(t);
+    if(r && r.applied) render();
+  }catch(e){}
 }
 /* 전체 카테고리 Places 추천 */
 async function doRecommendPlacesAll(){
@@ -1263,16 +1283,18 @@ async function doRecommendPlacesAll(){
   const cats=CATEGORIES.filter(c=>c!=="축제");   // 축제 제외
   busyBtn("[data-recommend]","전체 장소 불러오는 중... (조금 걸려요)");
   try{
-    let all=[];
+    let all=[], tries=0, fails=0, lastErr=null;
     for(const city of cities){
       for(const cat of cats){
-        try{ all=all.concat(await placesSearch(city, cat)); }catch(e){}
+        tries++;
+        try{ all=all.concat(await placesSearch(city, cat)); }catch(e){ fails++; lastErr=e; }
       }
     }
     const added=addPlacesToTrip(t, all);   // 함수가 서버측에서 한글이름·설명 이미 붙임
     dedupePlacesByName(t);
     save(); render();
-    toast(`전체 ${added}곳 불러왔어요`);
+    if(added===0 && fails===tries && lastErr){ toast(placeErr(lastErr),5000); }  // 전부 실패는 조용히 넘기지 않고 원인 안내
+    else{ toast(`전체 ${added}곳 불러왔어요`); maybeEnrich(t); }
   }catch(e){ toast(placeErr(e),5000); unbusyBtn("[data-recommend]"); }
 }
 
@@ -1339,7 +1361,7 @@ async function doAutoSchedule(extra){
   try{
     const dayList=[];
     for(let i=0;i<sp.days;i++){ const d=new Date(sp.s); d.setDate(d.getDate()+i);
-      const ds=d.toISOString().slice(0,10);
+      const ds=fmtISO(d);   // 로컬 기준(타임존 밀림 방지)
       const city=t.cities.find(c=>{const s=parseD(c.start),e=parseD(c.end);return s&&e&&d>=s&&d<=e;});
       dayList.push({dayIndex:i+1,date:ds,city:city?city.name:""}); }
     const intLabel={relaxed:"여유(하루 부하 낮게, 장소 2~3곳)",normal:"알차게(하루 3~4곳)",packed:"빡세게(하루 4~5곳, 부하 높게)"}[t.intensity];
@@ -1370,7 +1392,10 @@ ${extra?`[추가 지시] ${extra}`:""}
       const day=schedule.find(s=>s.dayIndex===od.dayIndex); if(!day) return;
       (od.items||[]).forEach(it=>{
         let placeId=null;
-        if(it.placeMatch){ const p=t.places.find(x=>x.name===it.placeMatch); if(p){ placeId=p.id; p.status="scheduled"; } }
+        if(it.placeMatch){ const mk=normKey(it.placeMatch);
+          const p=t.places.find(x=>x.name===it.placeMatch)
+            || t.places.find(x=>{ const k=normKey(x.name); return k && (k===mk || mk.indexOf(k)>=0 || k.indexOf(mk)>=0); });
+          if(p){ placeId=p.id; p.status="scheduled"; } }
         day.items.push({id:uid(),time:it.time||"",title:it.title||it.placeMatch||"일정",placeId,note:it.note||""});
       });
     });
@@ -1403,7 +1428,7 @@ async function doPackAI(){
    구글 로그인 + 드라이브 동기화 (appDataFolder)
    ============================================================ */
 const drive = {
-  token:null, tokenClient:null, ready:false,
+  token:null, tokenClient:null, ready:false, fileId:null,
   init(){
     if(!window.google||!google.accounts||!google.accounts.oauth2) return;
     try{
@@ -1421,19 +1446,28 @@ const drive = {
     }catch(e){}
   },
   signIn(){ if(!this.ready){ toast("구글 로그인 스크립트 로딩 중이거나 이 주소에선 불가해요"); return; } this.tokenClient.requestAccessToken({prompt:"consent"}); },
-  signOut(){ if(this.token&&google.accounts.oauth2) google.accounts.oauth2.revoke(this.token,()=>{}); this.token=null; toast("로그아웃"); closeModal(); render(); },
+  signOut(){ if(this.token&&google.accounts.oauth2) google.accounts.oauth2.revoke(this.token,()=>{}); this.token=null; this.fileId=null; toast("로그아웃"); closeModal(); render(); },
   async findFile(){
+    if(this.fileId) return this.fileId;   // 조회 결과 캐시(저장마다 검색 왕복 줄임)
     const q=encodeURIComponent(`name='${DRIVE_FILE_NAME}'`);
     const r=await fetch(`https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,name)`,
       {headers:{Authorization:"Bearer "+this.token}});
-    const j=await r.json(); return j.files&&j.files[0]?j.files[0].id:null;
+    const j=await r.json(); this.fileId = (j.files&&j.files[0]) ? j.files[0].id : null; return this.fileId;
   },
   async download(){
     try{
       const id=await this.findFile(); if(!id) { await this.upload(); return; }
       const r=await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`,{headers:{Authorization:"Bearer "+this.token}});
       const remote=await r.json();
-      if(remote&&remote.trips){ state=remote; localStorage.setItem(STORE_KEY,JSON.stringify(state)); }
+      if(remote&&remote.trips){
+        const localT=(state&&state.updatedAt)||0, remoteT=remote.updatedAt||0;
+        if(remoteT>=localT){   // 원격이 더 최신(또는 동급) → 채택
+          state=remote; localStorage.setItem(STORE_KEY,JSON.stringify(state));
+        }else{                 // 로컬이 더 최신 → 로컬 보존하고 원격을 갱신(덮어쓰기로 인한 손실 방지)
+          await this.upload();
+          toast("이 기기의 최신 변경을 지켰어요");
+        }
+      }
     }catch(e){ toast("드라이브 불러오기 실패"); }
   },
   async upload(){
@@ -1445,9 +1479,10 @@ const drive = {
       +JSON.stringify(meta)+`\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n`
       +JSON.stringify(state)+`\r\n--${boundary}--`;
     const url=id?`https://www.googleapis.com/upload/drive/v3/files/${id}?uploadType=multipart`
-      :`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart`;
-    await fetch(url,{method:id?"PATCH":"POST",
+      :`https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id`;
+    const r=await fetch(url,{method:id?"PATCH":"POST",
       headers:{Authorization:"Bearer "+this.token,"Content-Type":`multipart/related; boundary=${boundary}`},body});
+    if(!id){ try{ const j=await r.json(); if(j&&j.id) this.fileId=j.id; }catch(e){} }   // 새로 만든 파일 ID 캐시
   }
 };
 
